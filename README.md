@@ -103,9 +103,16 @@ The script checks:
 - `GET /api/health`
 - `GET /api/detection/latest`
 - `GET /dashboard`
+- `GET /css/main.css`
+- `GET /js/main.js`
 - the `Detector consolidado` card and key detector fields in the dashboard HTML
 
 If any of those checks fails, the command exits with a non-zero status so it can be used in operational validation and CI-style gating.
+
+## Operational docs
+
+- [docs/OPERATIONS.md](docs/OPERATIONS.md)
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
 
 ## Limitations
 

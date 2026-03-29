@@ -5,6 +5,8 @@ Valida:
 - /api/health
 - /api/detection/latest
 - /dashboard
+- /css/main.css
+- /js/main.js
 - presença dos elementos-chave do card do detector no HTML
 
 Uso padrão:
@@ -29,6 +31,10 @@ from typing import Any
 DEFAULT_BASE_URL = os.getenv("TCP_BRAIN_SMOKE_BASE_URL", "https://tcp.escossio.dev.br")
 DEFAULT_TIMEOUT = float(os.getenv("TCP_BRAIN_SMOKE_TIMEOUT", "15"))
 USER_AGENT = "tcp-brain-smoke/1.0"
+ASSET_CHECKS = (
+    ("/css/main.css", ("text/css",)),
+    ("/js/main.js", ("application/javascript", "text/javascript", "application/x-javascript")),
+)
 
 
 @dataclass
@@ -95,6 +101,14 @@ def ensure(condition: bool, message: str) -> None:
         fail(message)
 
 
+def ensure_content_type(resp: Response, url: str, expected_prefixes: tuple[str, ...]) -> None:
+    content_type = resp.content_type.lower()
+    ensure(
+        any(content_type.startswith(prefix) for prefix in expected_prefixes),
+        f"{url} retornou Content-Type inesperado: {resp.content_type!r}",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smoke test operacional do tcp-brain")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Base URL do serviço")
@@ -132,6 +146,13 @@ def main() -> int:
     ensure("id=\"detector-state\"" in dashboard_html, f"{dashboard_url} não contém detector-state")
     ensure("id=\"detector-decision\"" in dashboard_html, f"{dashboard_url} não contém detector-decision")
     ok(f"Dashboard OK: HTTP {dashboard_resp.status} | card do detector encontrado")
+
+    for asset_path, content_types in ASSET_CHECKS:
+        asset_url = f"{base_url}{asset_path}"
+        _, asset_resp = fetch_text(asset_url, timeout)
+        ensure(asset_resp.status == 200, f"{asset_url} retornou HTTP {asset_resp.status}")
+        ensure_content_type(asset_resp, asset_url, content_types)
+        ok(f"Asset OK: HTTP {asset_resp.status} | {asset_path} | Content-Type={asset_resp.content_type}")
 
     print("[OK] Smoke test concluído com sucesso.")
     return 0
