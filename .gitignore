@@ -1,0 +1,55 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Logs, dumps and diagnostics
+logs/
+*.log
+diagnostics/
+dumps/
+dump/
+
+# Backups and editor temp files
+*.bak
+*.bak-*
+*.bak.*
+*~
+*.swp
+*.swo
+
+# Secrets and local config
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Python packaging and build artifacts
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Front-end dependency caches
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS noise
+.DS_Store
+Thumbs.db

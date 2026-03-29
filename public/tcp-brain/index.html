@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TCP BRAIN v2.2</title>
+    <link rel="stylesheet" href="/css/main.css?v=20260328">
+</head>
+<body>
+    <h2 style="color: var(--accent); margin-bottom: 20px;">TCP BRAIN <span style="font-size: 12px; color: #555;">v2.2</span></h2>
+    
+    <div class="tb-grid">
+        <div class="tb-kpi">
+            <div class="k">Requisições Totais</div>
+            <div class="v" id="total-hits">0</div>
+        </div>
+        <div class="tb-kpi">
+            <div class="k">Cache Hit Rate</div>
+            <div class="v" id="hit-rate">0%</div>
+        </div>
+        <div class="tb-kpi">
+            <div class="k">Chamadas IA (Upstream)</div>
+            <div class="v" id="ia-calls">0</div>
+        </div>
+        <div class="tb-kpi">
+            <div class="k">Economia Estimada</div>
+            <div class="v" id="savings">R$ 0,00</div>
+        </div>
+    </div>
+
+    <div class="tb-panel">
+        <div class="tb-card-head">
+            <h3 style="margin:0">Detector consolidado</h3>
+            <span id="detector-status-pill" class="tb-pill tb-pill-muted">carregando</span>
+        </div>
+
+        <div class="tb-detection-grid">
+            <div class="tb-detection-box">
+                <div class="k">Estado</div>
+                <div class="v" id="detector-state">—</div>
+            </div>
+            <div class="tb-detection-box">
+                <div class="k">Decisão</div>
+                <div class="v" id="detector-decision">—</div>
+            </div>
+            <div class="tb-detection-box">
+                <div class="k">Host monitorado</div>
+                <div class="v" id="detector-host">—</div>
+            </div>
+            <div class="tb-detection-box">
+                <div class="k">Risk score</div>
+                <div class="v" id="detector-score">—</div>
+            </div>
+            <div class="tb-detection-box">
+                <div class="k">Sinal principal</div>
+                <div class="v" id="detector-signal">—</div>
+            </div>
+            <div class="tb-detection-box">
+                <div class="k">Rodada</div>
+                <div class="v" id="detector-round">—</div>
+            </div>
+        </div>
+
+        <div class="tb-detection-details">
+            <div class="tb-detection-card">
+                <div class="k">Motivos principais</div>
+                <ul id="detector-reasons" class="tb-detection-list"></ul>
+                <div id="detector-flags" class="tb-detection-flags"></div>
+            </div>
+            <div class="tb-detection-card">
+                <div class="k">Top peers</div>
+                <ul id="detector-peers" class="tb-detection-list"></ul>
+            </div>
+            <div class="tb-detection-card">
+                <div class="k">Top portas</div>
+                <ul id="detector-ports" class="tb-detection-list"></ul>
+            </div>
+        </div>
+
+        <div class="tb-detection-card tb-detection-temporal">
+            <div class="tb-detection-temporal-head">
+                <div>
+                    <div class="k">Tendência recente</div>
+                    <div class="tb-detection-trend" id="detector-trend-label">—</div>
+                    <div id="detector-operational-badge" class="tb-chip tb-detection-operational-badge">—</div>
+                </div>
+                <span id="detector-trend-decision" class="tb-chip">—</span>
+            </div>
+            <div id="detector-temporal-summary" class="tb-detection-temporal-summary"></div>
+            <div id="detector-last-window-summary" class="tb-detection-window-summary"></div>
+            <ul id="detector-temporal-windows" class="tb-detection-list tb-detection-temporal-list"></ul>
+        </div>
+
+        <p id="detector-origin" class="tb-muted" style="margin:12px 0 0;"></p>
+    </div>
+
+    <div class="tb-card-head">
+        <h3 style="margin:0">Live Feed</h3>
+        <button id="btn-pause-feed" class="tb-btn-pause">PAUSAR</button>
+    </div>
+    
+    <div id="recent-list">
+        <!-- Cards serão inseridos aqui -->
+    </div>
+
+    <script type="module" src="/js/main.js?v=20260328"></script>
+</body>
+</html>
