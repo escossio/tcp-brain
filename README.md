@@ -84,6 +84,29 @@ Environment variables used by the backend include:
 - The repository is organized for production use, but it still depends on the surrounding Apache and Cloudflare Tunnel setup for the public domain.
 - The front is versioned in the repository, but the live publication path remains separate from the repo root for operational continuity.
 
+## Smoke test
+
+Run the operational smoke test to verify the minimum healthy state of the service:
+
+```bash
+python3 scripts/smoke_tcp_brain.py
+```
+
+You can override the target and timeout when needed:
+
+```bash
+python3 scripts/smoke_tcp_brain.py --base-url https://tcp.escossio.dev.br --timeout 20
+```
+
+The script checks:
+
+- `GET /api/health`
+- `GET /api/detection/latest`
+- `GET /dashboard`
+- the `Detector consolidado` card and key detector fields in the dashboard HTML
+
+If any of those checks fails, the command exits with a non-zero status so it can be used in operational validation and CI-style gating.
+
 ## Limitations
 
 - Dependency versions are intentionally unpinned for now.
