@@ -87,7 +87,7 @@ function setStatusPill(state, kind = "muted") {
 
 export async function updateDetection() {
   try {
-    const resp = await fetch("/api/detection/latest", { cache: "no-store" });
+    const resp = await fetch("/tcp-brain/api/detection/latest", { cache: "no-store" });
     const data = await resp.json();
 
     if (!resp.ok || data.detector_status === "unavailable") {
@@ -145,14 +145,14 @@ export async function updateDetection() {
     });
     setList("detector-ports", data.top_ports || [], (item) => `${item.port}: ${item.count}`);
   } catch {
-    setStatusPill("erro", "bad");
-    setText("detector-state", "erro • indisponível");
-    setText("detector-decision", "indisponível");
+    setStatusPill("última leitura indisponível", "warn");
+    setText("detector-state", "leitura pendente");
+    setText("detector-decision", "aguardando próxima leitura");
     setText("detector-host", "—");
     setText("detector-score", "—");
     setText("detector-signal", "—");
     setText("detector-round", "—");
-    setText("detector-origin", "Não foi possível ler o estado consolidado do detector.");
+    setText("detector-origin", "A última leitura consolidada do detector não está disponível no momento.");
     setList("detector-reasons", [], () => "");
     setList("detector-peers", [], () => "");
     setList("detector-ports", [], () => "");

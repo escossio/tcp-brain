@@ -7,7 +7,7 @@ function formatMoney(value) {
 
 export async function updateStats() {
   try {
-    const resp = await fetch("/api/stats", { cache: "no-store" });
+    const resp = await fetch("/tcp-brain/api/stats", { cache: "no-store" });
     const data = await resp.json();
     const totalHits = document.getElementById("total-hits");
     const hitRate = document.getElementById("hit-rate");

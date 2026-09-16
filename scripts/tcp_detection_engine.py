@@ -442,7 +442,7 @@ def fmt_rate(value: float) -> str:
     return f"{value:.2%}"
 
 
-def build_summary(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+def build_summary(events: List[Dict[str, Any]], *, focus_host: str = FOCUS_HOST) -> Dict[str, Any]:
     ordered = sorted(
         events,
         key=lambda e: event_time(e) or datetime.min.replace(tzinfo=timezone.utc),
@@ -965,8 +965,8 @@ def build_summary(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         "ip_risk": ip_risk_rows[:20],
         "scan_candidates": scan_rows[:20],
         "pair_risk": pair_risk_rows[:20],
-        "focus_host": FOCUS_HOST,
-        "focus_host_report": build_host_report(FOCUS_HOST, ordered, ip_risk_rows),
+        "focus_host": focus_host,
+        "focus_host_report": build_host_report(focus_host, ordered, ip_risk_rows),
         "first_ts": (event_time(ordered[0]).isoformat() if ordered and event_time(ordered[0]) else None),
         "last_ts": (event_time(ordered[-1]).isoformat() if ordered and event_time(ordered[-1]) else None),
         "window_size": window_size,
@@ -2007,18 +2007,29 @@ def build_detection_status(summary: Dict[str, Any], output_dir: Path) -> Dict[st
     return payload
 
 
-def write_detection_status(summary: Dict[str, Any], output_dir: Path) -> Dict[str, Any]:
+def write_detection_status(
+    summary: Dict[str, Any],
+    output_dir: Path,
+    *,
+    write_default_status: bool = True,
+) -> Dict[str, Any]:
     status = build_detection_status(summary, output_dir)
     status_text = json.dumps(status, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "tcp_detection_status.json").write_text(status_text, encoding="utf-8")
-    DEFAULT_STATUS_DIR.mkdir(parents=True, exist_ok=True)
-    DEFAULT_STATUS_FILE.write_text(status_text, encoding="utf-8")
+    if write_default_status:
+        DEFAULT_STATUS_DIR.mkdir(parents=True, exist_ok=True)
+        DEFAULT_STATUS_FILE.write_text(status_text, encoding="utf-8")
     return status
 
 
-def write_outputs(summary: Dict[str, Any], output_dir: Path) -> None:
+def write_outputs(
+    summary: Dict[str, Any],
+    output_dir: Path,
+    *,
+    write_default_status: bool = True,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "tcp_detection_summary.md").write_text(render_summary_md(summary), encoding="utf-8")
     (output_dir / "tcp_detection_alerts.md").write_text(render_alerts_md(summary), encoding="utf-8")
@@ -2044,7 +2055,7 @@ def write_outputs(summary: Dict[str, Any], output_dir: Path) -> None:
         json.dumps(summary, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    write_detection_status(summary, output_dir)
+    write_detection_status(summary, output_dir, write_default_status=write_default_status)
 
 
 def main() -> int:
@@ -2056,6 +2067,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--summary-only", action="store_true")
+    parser.add_argument("--no-default-status-write", action="store_true")
+    parser.add_argument("--focus-host", default=FOCUS_HOST)
     args = parser.parse_args()
 
     paths = discover_sources(args.source_file, args.include_rotated)
@@ -2067,16 +2080,24 @@ def main() -> int:
         if args.limit and len(events) >= args.limit:
             break
 
-    summary = build_summary(events)
+    summary = build_summary(events, focus_host=args.focus_host)
     if not args.summary_only:
-        write_outputs(summary, args.output_dir)
+        write_outputs(
+            summary,
+            args.output_dir,
+            write_default_status=not args.no_default_status_write,
+        )
     else:
         args.output_dir.mkdir(parents=True, exist_ok=True)
         (args.output_dir / "tcp_detection_summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        write_detection_status(summary, args.output_dir)
+        write_detection_status(
+            summary,
+            args.output_dir,
+            write_default_status=not args.no_default_status_write,
+        )
     return 0
 
 
