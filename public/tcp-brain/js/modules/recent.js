@@ -12,7 +12,7 @@ export async function updateRecent() {
   if (!root) return;
 
   try {
-    const resp = await fetch("/api/recent", { cache: "no-store" });
+    const resp = await fetch("/tcp-brain/api/recent", { cache: "no-store" });
     const data = await resp.json();
     if (!Array.isArray(data)) {
       root.innerHTML = '<div class="tb-muted">Sem feed recente.</div>';

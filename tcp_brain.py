@@ -38,7 +38,7 @@ FRONTEND_CANDIDATES = [
     Path("/srv/tcp/explainer"),
 ]
 
-DETECTION_STATUS_DIR = Path("/srv/tcp/knowledge/detection")
+DETECTION_STATUS_DIR = Path(os.getenv("TCP_BRAIN_DETECTION_STATUS_DIR", "/srv/tcp/knowledge/detection"))
 DETECTION_STATUS_FILE = DETECTION_STATUS_DIR / "tcp_detection_status.json"
 DETECTION_DIAGNOSTICS_ROOT = Path("/codex/diagnostics")
 
@@ -658,4 +658,6 @@ def shutdown():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8091)
+    host = os.getenv("TCP_BRAIN_HOST", "127.0.0.1")
+    port = int(os.getenv("TCP_BRAIN_PORT", "8091"))
+    uvicorn.run(app, host=host, port=port)
