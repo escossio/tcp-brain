@@ -2,120 +2,138 @@
 
 `tcp-brain` is the TCP intelligence layer used to consolidate detector output, expose a small HTTP API, and serve the dashboard used in production.
 
-## What is included
+## Current production topology
 
-- Backend/API in `tcp_brain.py`
-- Historical/event helpers in `tcp_history.py`
-- Offline detector and maintenance scripts in `scripts/`
-- Published dashboard/front in `public/tcp-brain/`
+The current observed production path is:
 
-## Operational architecture
+```text
+Internet
+-> Cloudflare
+-> Apache
+-> /tcp-brain/ static frontend
+-> /tcp-brain/api/ reverse proxy
+-> 127.0.0.1:18091
+-> TCP Brain
+```
 
-Production currently runs as:
+The active backend is managed by `tcp-brain.service` and runs from:
 
-`Cloudflare Tunnel -> Apache (127.0.0.1:8080) -> static front + /api/ -> backend (127.0.0.1:8091)`
+```text
+/srv/migrated-debian2/app-data/tcp-brain
+```
 
-The public dashboard is served from:
+The frontend currently served to users is a separate published copy:
 
-- `/dashboard`
-- `/css/main.css?v=20260328`
-- `/js/main.js?v=20260328`
+```text
+/srv/escossio-site/public/tcp-brain
+```
 
-The consolidated detector status is exposed at:
+The official frontend is path-prefix aware and runs under:
 
-- `/api/detection/latest`
+```text
+/tcp-brain/
+```
+
+## Source, runtime, publication, configuration
+
+These are separate authorities:
+
+- Source code: GitHub `main`.
+- Runtime: `/srv/migrated-debian2/app-data/tcp-brain`.
+- Published front: `/srv/escossio-site/public/tcp-brain`.
+- Runtime config: `systemd` plus files under `/etc/tcp-brain/`.
+
+After PR #1, GitHub `main` again represents the source code recovered from the active runtime. It does not mean production is automatically updated when `main` changes.
+
+Machine-specific config, service files, Apache rules, Cloudflare routing, secrets, database state, detector output, and published frontend copies remain outside this repository.
+
+## Main components
+
+- Backend/API: `tcp_brain.py`
+- Historical/event helpers: `tcp_history.py`
+- Offline detector and maintenance scripts: `scripts/`
+- Versioned dashboard source: `public/tcp-brain/`
+- Operational documentation: `docs/`
 
 ## Main endpoints
 
-- `GET /` - dashboard entry point
-- `GET /dashboard` - main dashboard view
-- `GET /api/health` - basic service health
-- `GET /api/stats` - runtime statistics
-- `GET /api/recent` - recent events
-- `GET /api/detection/latest` - consolidated detector result
-- `GET /api/tcp-explain` - explanation endpoint
-- `GET /metrics` - Prometheus metrics, when enabled
+When accessed through the current public prefix, the main routes are:
 
-## Repository structure
+- `GET /tcp-brain/` - published dashboard frontend
+- `GET /tcp-brain/api/health` - basic service health through Apache
+- `GET /tcp-brain/api/stats` - runtime statistics
+- `GET /tcp-brain/api/recent` - recent events
+- `GET /tcp-brain/api/detection/latest` - latest detector snapshot
+
+When accessed directly on the backend, the same API is served without the `/tcp-brain` prefix:
+
+- `GET /api/health`
+- `GET /api/stats`
+- `GET /api/recent`
+- `GET /api/detection/latest`
+- `POST /api/tcp-explain`
+- `GET /metrics`
+
+Do not use `GET /api/tcp-explain` as a health check. The application defines the explanation endpoint as `POST`.
+
+## Runtime configuration
+
+The backend host, port, and detector snapshot directory are configurable:
+
+- `TCP_BRAIN_HOST`
+- `TCP_BRAIN_PORT`
+- `TCP_BRAIN_DETECTION_STATUS_DIR`
+
+The code default for `TCP_BRAIN_PORT` remains `8091` for compatibility. Current production overrides it to `18091` through runtime configuration.
+
+The detector status path used by production is configured outside Git. The current observed detector data directory is:
 
 ```text
-/srv/tcp-brain
-├── tcp_brain.py
-├── tcp_history.py
-├── requirements.txt
-├── public/
-│   └── tcp-brain/
-├── scripts/
-└── .gitignore
+/srv/migrated-debian2/app-data/tcp-knowledge/detection
 ```
 
-## Front and backend relationship
+See [docs/RUNTIME_CONFIGURATION.md](docs/RUNTIME_CONFIGURATION.md) for the full environment contract.
 
-The front is a static dashboard that consumes the backend API. In production the same repository also contains the front source under `public/tcp-brain/`, which keeps the published assets and the backend in one place.
+## Detector freshness is not service health
 
-The live site also uses a production copy at `/srv/escossio-site/public/tcp-brain`, which is the directory currently exposed by Apache.
+`/api/health` returning `200` means the backend is reachable. It does not prove the detector is producing fresh snapshots.
+
+The detector can be stale or stopped while the backend remains healthy. Check `/tcp-brain/api/detection/latest`, the snapshot timestamp, and the status file mtime before concluding that detection is current.
+
+At the time this documentation was aligned, the detector snapshot was old relative to the current date. Treat detector freshness as a separate operational signal.
 
 ## Local run
 
-Install the Python dependencies and run the app with your preferred ASGI server:
+For local development, install dependencies and run the app with an ASGI server:
 
 ```bash
 pip install -r requirements.txt
-uvicorn tcp_brain:app --host 0.0.0.0 --port 8091
+uvicorn tcp_brain:app --host 127.0.0.1 --port 8091
 ```
 
-Environment variables used by the backend include:
-
-- `TCP_BRAIN_DB_DSN`
-- `TCP_BRAIN_DB_HOST`
-- `TCP_BRAIN_DB_PORT`
-- `TCP_BRAIN_DB_NAME`
-- `TCP_BRAIN_DB_USER`
-- `TCP_BRAIN_DB_PASSWORD` or `TCP_BRAIN_DB_PASS`
-- `OPENAI_API_KEY`
-- `TCP_BRAIN_UPSTREAM_URL`
-- `TCP_BRAIN_UPSTREAM_MODEL`
-- `TCP_BRAIN_COST_PER_IA_CALL_BRL`
-
-## Status and notes
-
-- The detector is designed to operate with a consolidated latest-result endpoint instead of requiring manual digging through historical artifacts.
-- `GET /api/detection/latest` is the canonical public entry point for the latest detector snapshot.
-- The repository is organized for production use, but it still depends on the surrounding Apache and Cloudflare Tunnel setup for the public domain.
-- The front is versioned in the repository, but the live publication path remains separate from the repo root for operational continuity.
-
-## Smoke test
-
-Run the operational smoke test to verify the minimum healthy state of the service:
+For direct script execution:
 
 ```bash
-python3 scripts/smoke_tcp_brain.py
+TCP_BRAIN_HOST=127.0.0.1 TCP_BRAIN_PORT=8091 python3 tcp_brain.py
 ```
 
-You can override the target and timeout when needed:
+Use `.env.example` as a placeholder template only. Never copy production secrets into the repository.
 
-```bash
-python3 scripts/smoke_tcp_brain.py --base-url https://tcp.escossio.dev.br --timeout 20
-```
+## Smoke test status
 
-The script checks:
-
-- `GET /api/health`
-- `GET /api/detection/latest`
-- `GET /dashboard`
-- `GET /css/main.css`
-- `GET /js/main.js`
-- the `Detector consolidado` card and key detector fields in the dashboard HTML
-
-If any of those checks fails, the command exits with a non-zero status so it can be used in operational validation and CI-style gating.
+`scripts/smoke_tcp_brain.py` still defaults to the older host and unprefixed asset paths. It is useful as a code reference, but it is only partially compatible with the current `/tcp-brain/` topology until a future update adjusts its default base URL and asset checks.
 
 ## Operational docs
 
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/OPERATIONS.md](docs/OPERATIONS.md)
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+- [docs/RUNTIME_CONFIGURATION.md](docs/RUNTIME_CONFIGURATION.md)
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 
 ## Limitations
 
 - Dependency versions are intentionally unpinned for now.
+- There is no verified automatic deployment from GitHub `main` to production.
 - The detector can run without Prometheus metrics if `prometheus_client` is unavailable, but metrics will be disabled in that case.
-- Historical maintenance scripts are included, but they are operational tools rather than a user-facing API.
+- Historical maintenance scripts are operational tools rather than a user-facing API.

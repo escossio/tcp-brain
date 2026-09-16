@@ -1,107 +1,159 @@
 # TROUBLESHOOTING
 
-Guia curto para diagnostico rapido do `tcp-brain`.
+Guia de diagnostico para a topologia atual do `tcp-brain`.
 
-## 1. Card do detector preso em "carregando"
-
-Possiveis causas:
-
-- backend fora do ar
-- `/api/detection/latest` retornando erro ou payload incompleto
-- dashboard apontando para assets antigos
-
-Checagens diretas:
-
-```bash
-curl -fsS https://tcp.escossio.dev.br/api/health
-curl -fsS https://tcp.escossio.dev.br/api/detection/latest
-curl -fsS https://tcp.escossio.dev.br/dashboard | grep -n "Detector consolidado"
-```
-
-## 2. `/api/detection/latest` falhando
-
-Possiveis causas:
-
-- banco indisponivel
-- dados de detector ausentes
-- backend travado em dependencia externa
-
-Checagens diretas:
-
-```bash
-curl -i https://tcp.escossio.dev.br/api/detection/latest
-curl -i https://tcp.escossio.dev.br/api/health
-python3 /srv/tcp-brain/scripts/smoke_tcp_brain.py
-```
-
-Se `health` estiver verde e `detection/latest` falhar, o problema costuma estar na consolidacao do detector e nao na publicacao do front.
-
-## 3. Assets do front nao carregando
+## 1. Backend 18091 indisponivel
 
 Sintomas:
 
-- dashboard abre, mas sem estilo
-- JS nao inicializa o card
-- console do navegador mostra 404 ou MIME type inesperado
+- `/tcp-brain/api/health` retorna `502`, `503` ou timeout;
+- Apache responde, mas API falha;
+- nao ha listener em `127.0.0.1:18091`.
 
-Checagens diretas:
-
-```bash
-curl -I https://tcp.escossio.dev.br/css/main.css
-curl -I https://tcp.escossio.dev.br/js/main.js
-python3 /srv/tcp-brain/scripts/smoke_tcp_brain.py
-```
-
-O esperado e `HTTP 200` com `Content-Type` plausivel para CSS e JS.
-
-## 4. Divergencia entre front versionado e front publicado
-
-Possiveis causas:
-
-- arquivo atualizado em `/srv/tcp-brain/public/tcp-brain`, mas nao copiado para `/srv/escossio-site/public/tcp-brain`
-- Apache servindo uma copia antiga
-- cache intermediario segurando asset velho
-
-Checagens diretas:
+Checagens somente leitura:
 
 ```bash
-diff -qr /srv/tcp-brain/public/tcp-brain /srv/escossio-site/public/tcp-brain
-ls -l /srv/tcp-brain/public/tcp-brain/css/main.css /srv/escossio-site/public/tcp-brain/css/main.css
-ls -l /srv/tcp-brain/public/tcp-brain/js/main.js /srv/escossio-site/public/tcp-brain/js/main.js
+systemctl status tcp-brain.service
+systemctl show tcp-brain.service -p MainPID -p ExecStart -p EnvironmentFiles
+ss -lntp | grep 18091
+curl -i http://127.0.0.1:18091/api/health
 ```
 
-## 5. Confusao entre Apache, backend e tunnel
+Nao reinicie o servico durante diagnostico forense sem autorizacao explicita.
 
-Regra pratica:
+## 2. Apache saudavel, API falhando
 
-- Apache em `127.0.0.1:8080` entrega front e faz proxy de `/api/`
-- backend em `127.0.0.1:8091` responde a API
-- Cloudflare Tunnel expõe o Apache
+Sintomas:
 
-Checagens diretas:
+- `/tcp-brain/` carrega;
+- `/tcp-brain/api/health` falha;
+- backend direto pode ou nao responder.
+
+Checagens:
 
 ```bash
-curl -I http://127.0.0.1:8080/dashboard
-curl -I http://127.0.0.1:8080/api/health
-curl -I http://127.0.0.1:8091/api/health
+curl -I -H 'Host: www.escossio.com' http://127.0.0.1/tcp-brain/
+curl -i -H 'Host: www.escossio.com' http://127.0.0.1/tcp-brain/api/health
+grep -R "tcp-brain/api\\|18091" /etc/apache2/sites-enabled /etc/apache2/sites-available
 ```
 
-Se o backend local responder e o Apache nao, a falha esta na camada de publicacao, nao no detector.
+Se o backend direto responde e a rota Apache falha, o problema esta na publicacao/proxy, nao no detector.
 
-## Comandos uteis
+## 3. Frontend antigo ou divergente
+
+Sintomas:
+
+- UI nao reflete o codigo em GitHub `main`;
+- navegador carrega assets antigos;
+- HTML, JS e CSS parecem fora de sincronia.
+
+Checagens:
 
 ```bash
-python3 /srv/tcp-brain/scripts/smoke_tcp_brain.py
-curl -fsS https://tcp.escossio.dev.br/api/detection/latest | jq
-curl -I https://tcp.escossio.dev.br/css/main.css
-curl -I https://tcp.escossio.dev.br/js/main.js
+diff -qr public/tcp-brain /srv/escossio-site/public/tcp-brain
+find /srv/escossio-site/public/tcp-brain -maxdepth 3 -type f -printf '%p %s %TY-%Tm-%Td %TH:%TM:%TS\n'
+curl -I https://www.escossio.com/tcp-brain/
+curl -I https://www.escossio.com/tcp-brain/js/main.js
 ```
 
-## Quando parar e escalar
+GitHub `main`, runtime e frontend publicado sao autoridades diferentes. Merge em `main` nao publica automaticamente assets.
 
-Escale se houver:
+## 4. Detector stale
 
-- `health` verde, mas `detection/latest` quebra de forma persistente
-- assets 200 no disco, mas 404/500 no dominio publico
-- divergencia repetida entre o front versionado e o front publicado
-- Apache ok, backend ok localmente, mas o dominio publico continua errado
+Sintomas:
+
+- `/tcp-brain/api/health` retorna `200`;
+- `/tcp-brain/api/detection/latest` retorna dados antigos;
+- `generated_at`, `detector_timestamp` ou mtime do snapshot estao muito atrasados.
+
+Checagens:
+
+```bash
+curl -sS https://www.escossio.com/tcp-brain/api/detection/latest
+stat /srv/migrated-debian2/app-data/tcp-knowledge/detection/tcp_detection_status.json
+python3 -m json.tool /srv/migrated-debian2/app-data/tcp-knowledge/detection/tcp_detection_status.json | head -40
+systemctl list-units 'tcp-brain*detection*'
+systemctl list-timers 'tcp-brain*detection*'
+```
+
+Health verde nao implica detector fresco. Trate o detector como componente separado.
+
+## 5. Ausencia de service/timer do detector
+
+Se nao houver unit/timer ativo para o detector, isso explica snapshots antigos sem indicar falha do backend.
+
+Checagens:
+
+```bash
+systemctl list-unit-files 'tcp-brain*detection*'
+systemctl list-timers --all | grep -i tcp
+find /srv/migrated-debian2/app-data/tcp-knowledge/detection -maxdepth 2 -type f -printf '%p %TY-%Tm-%Td %TH:%TM:%TS\n'
+```
+
+Nao reative timer ou service sem uma etapa operacional propria.
+
+## 6. Cloudflare apontando para destino incorreto
+
+Sintomas:
+
+- dominio publico especifico nao resolve;
+- rota publica aponta para porta sem listener;
+- `www.escossio.com/tcp-brain` funciona, mas `tcp.escossio.com` nao.
+
+Estado observado:
+
+- `www.escossio.com/tcp-brain` esta ativo.
+- `tcp.escossio.com` aparece em configuracao local do Cloudflare apontando para `127.0.0.1:8091`, que e rota `KNOWN STALE/BROKEN ROUTE` para a producao atual.
+- `tcp.escossio.dev.br` nao deve ser assumido como ativo sem novo teste.
+
+Checagens:
+
+```bash
+grep -R "tcp.escossio\\|www.escossio.com\\|8091\\|18091" /etc/cloudflared
+curl -I https://www.escossio.com/tcp-brain/
+curl -I https://www.escossio.com/tcp-brain/api/health
+```
+
+## 7. Erro PostgreSQL
+
+Sintomas:
+
+- `/api/stats` ou `/api/recent` falham;
+- logs mostram erro de conexao ou schema;
+- `/api/health` ainda pode responder.
+
+Checagens sem imprimir credenciais:
+
+```bash
+systemctl show tcp-brain.service -p EnvironmentFiles
+grep -E 'TCP_BRAIN_DB_|TCP_BRAIN_DB_DSN' /etc/tcp-brain/tcp-brain.env | sed -E 's/=.*/=SET/'
+journalctl -u tcp-brain.service --since '1 hour ago' --no-pager
+```
+
+Nao execute migrations, `ensure_schema` manual, backfills ou DDL durante diagnostico.
+
+## 8. Assets com cache antigo
+
+Sintomas:
+
+- navegador continua buscando JS/CSS antigo;
+- modulo JS nao bate com `index.html`;
+- console mostra import quebrado.
+
+Checagens:
+
+```bash
+grep -n "main.js" public/tcp-brain/index.html /srv/escossio-site/public/tcp-brain/index.html
+grep -n "modules/" public/tcp-brain/js/main.js /srv/escossio-site/public/tcp-brain/js/main.js
+curl -I 'https://www.escossio.com/tcp-brain/js/main.js?v=20260428-2'
+```
+
+Cache-busting com querystring so ajuda quando a versao publicada realmente mudou. Ele nao substitui uma publicacao consistente do frontend.
+
+## 9. Referencias legadas
+
+Referencias a `127.0.0.1:8091`, `/srv/tcp-brain` e `/srv/tcp/knowledge/detection` podem aparecer em documentos historicos, defaults de codigo ou backups. Na producao atual observada:
+
+- backend efetivo: `127.0.0.1:18091`;
+- runtime efetivo: `/srv/migrated-debian2/app-data/tcp-brain`;
+- detector efetivo: path configurado por `TCP_BRAIN_DETECTION_STATUS_DIR`.

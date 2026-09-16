@@ -1,71 +1,132 @@
-# OPERACOES
+# OPERATIONS
 
-Documento curto para operação do `tcp-brain`.
+Runbook operacional atual do `tcp-brain`.
 
-## Fluxo de publicacao
+## Topologia efetiva
 
-1. O front canônico fica em `/srv/escossio-site/public/tcp-brain`.
-2. O repo versionado fica em `/srv/tcp-brain/public/tcp-brain`.
-3. O Apache escuta em `127.0.0.1:8080`.
-4. O Apache serve o front estatico e faz proxy de `/api/` para o backend em `127.0.0.1:8091`.
-5. O Cloudflare Tunnel aponta para o Apache, nao diretamente para o backend.
+```text
+Cloudflare
+-> Apache
+-> /tcp-brain/ frontend estatico
+-> /tcp-brain/api/ proxy reverso
+-> 127.0.0.1:18091
+-> tcp-brain.service
+```
+
+O backend em producao roda pelo `tcp-brain.service` a partir de:
+
+```text
+/srv/migrated-debian2/app-data/tcp-brain
+```
+
+O frontend publicado e servido por Apache a partir de:
+
+```text
+/srv/escossio-site/public/tcp-brain
+```
 
 ## Componentes principais
 
-- Front canônico: `/srv/escossio-site/public/tcp-brain`
-- Front versionado: `/srv/tcp-brain/public/tcp-brain`
-- Smoke test: `/srv/tcp-brain/scripts/smoke_tcp_brain.py`
-- Backend principal: `tcp_brain.py`
-- Endpoint de detector consolidado: `/api/detection/latest`
+- Source control: GitHub `main`.
+- Runtime ativo: `/srv/migrated-debian2/app-data/tcp-brain`.
+- Front publicado: `/srv/escossio-site/public/tcp-brain`.
+- Service manager: `tcp-brain.service`.
+- Backend local: `127.0.0.1:18091`.
+- Configuracao de runtime: `/etc/tcp-brain/` e `systemd`.
+- Snapshot do detector: diretorio indicado por `TCP_BRAIN_DETECTION_STATUS_DIR`.
 
-## Validacao minima
+## Service health
 
-Use esta ordem para checagem rapida:
+Service health responde a pergunta: "o backend esta vivo e respondendo HTTP?"
 
-1. `GET /api/health`
-2. `GET /api/detection/latest`
-3. `GET /dashboard`
-4. `GET /css/main.css`
-5. `GET /js/main.js`
-
-Se o `dashboard` abrir mas os assets falharem, o problema tende a ser de publicacao do front, nao do backend.
-
-## Smoke test
-
-Execute:
+Checagens somente leitura:
 
 ```bash
-python3 /srv/tcp-brain/scripts/smoke_tcp_brain.py
+systemctl status tcp-brain.service
+ss -lntp | grep 18091
+curl -i http://127.0.0.1:18091/api/health
+curl -i -H 'Host: www.escossio.com' http://127.0.0.1/tcp-brain/api/health
+curl -i https://www.escossio.com/tcp-brain/api/health
 ```
 
-Opcionalmente:
+Um `200` em `/api/health` nao garante que o detector esteja atualizado.
+
+## Detection freshness
+
+Detection freshness responde a pergunta: "o detector produziu snapshot recente?"
+
+Checagens somente leitura:
 
 ```bash
-python3 /srv/tcp-brain/scripts/smoke_tcp_brain.py --base-url https://tcp.escossio.dev.br --timeout 20
+curl -sS https://www.escossio.com/tcp-brain/api/detection/latest
+stat /srv/migrated-debian2/app-data/tcp-knowledge/detection/tcp_detection_status.json
+python3 -m json.tool /srv/migrated-debian2/app-data/tcp-knowledge/detection/tcp_detection_status.json | head
 ```
 
-O smoke test falha com exit code diferente de zero se qualquer checagem critica falhar.
+Compare o mtime do arquivo e campos como `generated_at`, `detector_timestamp` e `detector_round_id` com a data atual. Nao ha limite universal documentado aqui; a interpretacao depende da cadencia operacional esperada do detector.
 
-## Caminhos importantes
+Se `/api/health` esta verde mas o snapshot e antigo, o backend esta saudavel e o problema esta na cadeia do detector.
 
-- `README.md`: resumo e entrada rapida
-- `docs/OPERATIONS.md`: fluxo operacional
-- `docs/TROUBLESHOOTING.md`: falhas comuns e checagens
-- `scripts/smoke_tcp_brain.py`: validacao operacional
-- `public/tcp-brain/index.html`: pagina base do front
-- `public/tcp-brain/css/main.css`: estilo principal
-- `public/tcp-brain/js/main.js`: boot do front
-- `public/tcp-brain/js/modules/`: modulos do dashboard
+## Frontend publicado
 
-## Endpoints principais
+O frontend que o usuario ve nao e servido diretamente do checkout Git. Ele fica em:
 
-- `/api/health`
-- `/api/stats`
-- `/api/recent`
-- `/api/detection/latest`
-- `/api/tcp-explain`
-- `/dashboard`
+```text
+/srv/escossio-site/public/tcp-brain
+```
 
-## Observacao operacional
+Comparacao segura:
 
-Se houver divergencia entre o front versionado e o front publicado, o sintoma tipico e o dashboard carregar HTML antigo ou assets inconsistentes mesmo com `/api/health` verde.
+```bash
+diff -qr public/tcp-brain /srv/escossio-site/public/tcp-brain
+```
+
+Nao sincronize automaticamente. Divergencias entre source, runtime e publicacao precisam ser revisadas antes de qualquer deploy.
+
+## Apache
+
+Na topologia observada, Apache atende `www.escossio.com` e publica:
+
+- `/tcp-brain/` como frontend estatico;
+- `/tcp-brain/api/` como proxy para `http://127.0.0.1:18091/api/`.
+
+Checagens somente leitura:
+
+```bash
+apachectl -S
+grep -R "tcp-brain\\|18091" /etc/apache2/sites-enabled /etc/apache2/sites-available
+curl -I -H 'Host: www.escossio.com' http://127.0.0.1/tcp-brain/
+curl -I -H 'Host: www.escossio.com' http://127.0.0.1/tcp-brain/api/health
+```
+
+## Cloudflare
+
+Cloudflare deve ser tratado como camada externa de roteamento. O hostname comprovadamente ativo nesta auditoria documental foi:
+
+```text
+https://www.escossio.com/tcp-brain/
+```
+
+Foi observada uma rota antiga em configuracao local do Cloudflare para `tcp.escossio.com` apontando para `127.0.0.1:8091`. Como nao ha listener em `8091` na producao atual e o hostname nao resolveu no teste realizado, documente essa rota como `KNOWN STALE/BROKEN ROUTE` ate nova correcao operacional.
+
+## Sequencia segura de diagnostico
+
+1. Verifique `tcp-brain.service` sem reiniciar.
+2. Verifique listener local em `18091`.
+3. Teste `http://127.0.0.1:18091/api/health`.
+4. Teste Apache local com `Host: www.escossio.com`.
+5. Teste a rota publica `https://www.escossio.com/tcp-brain/api/health`.
+6. Verifique `detection/latest` separadamente de `health`.
+7. Verifique mtime e timestamp do snapshot do detector.
+8. Compare frontend versionado e publicado se houver sintoma visual.
+9. Leia logs recentes antes de qualquer tentativa de correcao.
+
+## Smoke test atual
+
+`scripts/smoke_tcp_brain.py` ainda usa `https://tcp.escossio.dev.br` e assets sem o prefixo `/tcp-brain` como defaults. Portanto:
+
+```text
+SMOKE_TEST_CURRENT_TOPOLOGY_COMPATIBLE=PARTIAL
+```
+
+Uma etapa futura deve ajustar o smoke test para aceitar a topologia atual como default ou documentar claramente o uso de `--base-url https://www.escossio.com/tcp-brain`.
