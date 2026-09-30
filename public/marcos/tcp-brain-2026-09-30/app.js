@@ -5,6 +5,8 @@
   const rate = document.querySelector("#rate");
   const rateLabel = document.querySelector("#rateLabel");
   const copyLink = document.querySelector("#copyLink");
+  const autoplayGate = document.querySelector("#autoplayGate");
+  const startPresentation = document.querySelector("#startPresentation");
   const durations = [
     28.704, 30.36, 29.184, 30.36, 33.96,
     31.896, 22.296, 22.944, 30.36
@@ -104,6 +106,27 @@
     if (!player.paused && !player.ended) {
       raf = requestAnimationFrame(animate);
     }
+  }
+
+  async function beginPresentation() {
+    player.currentTime = 0;
+    player.playbackRate = Number(rate.value);
+    const playback = player.play();
+    document.body.classList.remove("presentation-locked");
+    if (autoplayGate) autoplayGate.hidden = true;
+    window.scrollTo(0, 0);
+    try {
+      await playback;
+      status.textContent = "Zagan · reproduzindo…";
+      cancelAnimationFrame(raf);
+      animate();
+    } catch {
+      status.textContent = "O navegador bloqueou o áudio. Use Reproduzir para iniciar.";
+    }
+  }
+
+  if (startPresentation) {
+    startPresentation.addEventListener("click", beginPresentation);
   }
 
   document.querySelector("#play").addEventListener("click", async () => {
