@@ -1,0 +1,30 @@
+[Unit]
+Description=TCP Brain passive SPAN metadata collector
+Documentation=file:/srv/tcp-brain-capture-20260930/docs/CAPTURE.md
+After=network-pre.target
+ConditionPathExists=/sys/class/net/enp3s0
+
+[Service]
+Type=simple
+DynamicUser=yes
+ExecStart=/usr/bin/python3 /opt/tcp-brain-capture/tcp_brain_capture.py --interface enp3s0 --vlans 210-217 --status-file /run/tcp-brain-capture/status.json --socket-path /run/tcp-brain-capture/events.sock --observation-point mikrotik:ether2:mirror-bidirectional
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=tcp-brain-capture
+RuntimeDirectoryMode=0750
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_PACKET
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

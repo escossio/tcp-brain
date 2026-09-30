@@ -1,0 +1,17 @@
+Este marco registra a retomada do TCP Brain e o momento em que ele deixou de ser apenas um projeto interessante para virar uma ferramenta operacional de verdade. O backend histórico e o banco de padrões já existiam, mas o pipeline de detecção estava parado desde primeiro de maio de dois mil e vinte e seis. Em trinta de setembro, nós reativamos o projeto de forma incremental, sem substituir o que já funcionava.
+
+O caso que abriu essa nova fase apareceu no Attention Router. O Transport estava ativo, o Browser também, mas a conexão com o CDP em dez ponto setenta e sete ponto dez ponto dois, porta nove dois dois três, simplesmente expirava. O Browser respondia localmente, então o problema estava no caminho entre os dois serviços. Até aquele momento, a evidência dizia apenas que o SYN saía do Transport e que não havia SYN ACK de volta.
+
+A primeira mudança foi dar olhos físicos ao TCP Brain. Configuramos a ether dois da MikroTik como origem de mirror, a ether cinco como destino e entregamos essa cópia para a enp três s zero do AGT. Essa placa ficou dedicada à captura, sem IP, sem rota, sem bridge e sem VLAN de serviço. O coletor trabalha somente com uma pequena janela de cabeçalhos e não persiste payload de aplicação.
+
+Sobre essa captura nasceu o Flow Analyzer. Em vez de enxergar pacotes soltos, ele passou a reconstruir o comportamento do fluxo. No caso real do Transport para o Browser, ele registrou dois SYN, um retry, zero SYN ACK e zero RST. Em seguida, correlacionou o mesmo evento com a testemunha física da MikroTik. Ou seja: não era apenas o kernel dizendo que transmitiu. O pacote realmente apareceu no fio.
+
+A camada seguinte localizou o salto. O SYN entrou fisicamente pela VLAN duzentos e onze, mas nenhuma emissão correspondente apareceu na VLAN duzentos e dez, onde está o Browser. Criamos então uma regra temporária de diagnóstico no RAW da MikroTik, com match exato para aquele TCP. A tentativa continuou falhando e o contador ficou em zero. Como controle, um ICMP da mesma origem para o gateway foi visto três de três vezes. As regras temporárias foram removidas logo depois.
+
+Foi aí que a investigação ficou realmente interessante. A captura física mostrou que o SYN TCP do Transport estava chegando ao fio com checksum inválido. No mesmo mirror, um fluxo funcional entre Worker e PostgreSQL apresentava checksum correto. A diferença estava no stack do namespace Transport: macvlan, VLAN e a interface física r oito um seis nove, com TX checksumming, TSO e GSO habilitados.
+
+Desabilitamos esses três offloads somente no eth zero do namespace Transport. No teste seguinte, o SYN apareceu no mesmo mirror com checksum válido. Imediatamente, o CDP do Browser passou a responder. A correção foi persistida no script de criação do namespace, para sobreviver a uma futura recriação da rede.
+
+Depois da prova, reiniciamos apenas o Transport. O Browser não foi reiniciado, não houve QR e não houve novo pareamento do WhatsApp. Em aproximadamente três segundos, o Transport voltou a ready, com browser debug alcançável, WhatsApp conectado, identidade do proprietário validada e autoridade de comando pronta.
+
+Esse é o motivo pelo qual esta passada virou um marco de engenharia. A observabilidade reduziu o problema em etapas verificáveis: timeout, ausência de SYN ACK, ausência de egress inter VLAN, descarte antes do RAW e, finalmente, checksum TCP inválido no fio. A causa não foi escolhida por intuição. Ela foi encontrada por evidência. E o próprio TCP Brain, recém reativado, foi a ferramenta que tornou isso possível.
