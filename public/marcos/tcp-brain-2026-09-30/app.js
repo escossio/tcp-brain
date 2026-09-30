@@ -5,6 +5,8 @@
   const rate = document.querySelector("#rate");
   const rateLabel = document.querySelector("#rateLabel");
   const copyLink = document.querySelector("#copyLink");
+  const shareWhatsApp = document.querySelector("#shareWhatsApp");
+  const shareUrl = "https://www.escossio.com/marcos/tcp-brain-2026-09-30/share/";
   const autoplayGate = document.querySelector("#autoplayGate");
   const startPresentation = document.querySelector("#startPresentation");
   const durations = [
@@ -182,12 +184,19 @@
   if (copyLink) {
     copyLink.addEventListener("click", async () => {
       try {
-        await navigator.clipboard.writeText(location.href.split("#")[0]);
+        await navigator.clipboard.writeText(shareUrl);
         copyLink.textContent = "Link copiado";
         setTimeout(() => { copyLink.textContent = "Copiar link"; }, 1800);
       } catch {
         copyLink.textContent = "Copie pela barra do navegador";
       }
+    });
+  }
+
+  if (shareWhatsApp) {
+    shareWhatsApp.addEventListener("click", () => {
+      const message = "TCP Brain — da captura física à causa raiz\n" + shareUrl;
+      window.location.href = "https://wa.me/?text=" + encodeURIComponent(message);
     });
   }
 
