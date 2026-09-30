@@ -1,0 +1,29 @@
+[Unit]
+Description=TCP Brain authoritative runtime trunk metadata collector
+After=network-pre.target
+ConditionPathExists=/sys/class/net/enp1s0
+
+[Service]
+Type=simple
+DynamicUser=yes
+ExecStart=/usr/bin/python3 /opt/tcp-brain-capture/tcp_brain_capture.py --interface enp1s0 --vlans 210-217 --status-file /run/tcp-brain-capture-trunk/status.json --socket-path /run/tcp-brain-capture-trunk/events.sock --observation-point agt:enp1s0:runtime-trunk
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=tcp-brain-capture-trunk
+RuntimeDirectoryMode=0750
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_PACKET
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

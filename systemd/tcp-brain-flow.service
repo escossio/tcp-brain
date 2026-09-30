@@ -1,0 +1,29 @@
+[Unit]
+Description=TCP Brain metadata-only TCP flow analyzer
+Documentation=file:/srv/tcp-brain-capture-20260930/docs/FLOW_ANALYZER.md
+Wants=tcp-brain-capture.service tcp-brain-capture-trunk.service
+After=tcp-brain-capture.service tcp-brain-capture-trunk.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/tcp-brain-capture/tcp_brain_flow.py --input mirror=/run/tcp-brain-capture/events.sock --input trunk=/run/tcp-brain-capture-trunk/events.sock --event-socket /run/tcp-brain-flow/events.sock --status-file /run/tcp-brain-flow/status.json --entities /srv/projetos/attention-router-roc-e2e/config/entities.json --handshake-timeout 2.0 --dedupe-window-ms 5.0 --router-mac 48:8f:5a:02:06:89 --forward-timeout-ms 50
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=tcp-brain-flow
+RuntimeDirectoryMode=0750
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

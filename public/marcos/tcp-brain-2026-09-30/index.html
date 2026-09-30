@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#070b12">
+<meta name="description" content="Marco de engenharia: retomada do TCP Brain, localização de falha inter-VLAN e correção de checksum TCP inválido no Transport.">
+<meta property="og:type" content="article">
+<meta property="og:title" content="TCP Brain — da captura física à causa raiz">
+<meta property="og:description" content="O TCP Brain foi reativado e, no primeiro caso real, levou um timeout até um checksum TCP inválido no fio.">
+<meta property="og:url" content="https://www.escossio.com/marcos/tcp-brain-2026-09-30/">
+<meta name="twitter:card" content="summary">
+<link rel="canonical" href="https://www.escossio.com/marcos/tcp-brain-2026-09-30/">
+<title>Marco 001 · TCP Brain — da captura física à causa raiz</title>
+<link rel="stylesheet" href="/marcos/style.css?v=20260930-1">
+</head>
+<body>
+<div class="shell">
+<header class="topbar">
+<a class="brand" href="/">ESCOSSIO · ENGINEERING</a>
+<nav>
+<a href="/marcos/">Marcos</a>
+<a href="/tcp-brain/">TCP Brain</a>
+<a href="/">Início</a>
+</nav>
+</header>
+
+<section class="hero">
+<div class="eyebrow">Marco de Engenharia 001 · 30 de setembro de 2026</div>
+<h1>O TCP Brain voltou. E encontrou uma falha que estava invisível.</h1>
+<p class="lead">Um projeto de observabilidade parado havia meses foi reativado, ganhou captura física e análise de fluxo e, no primeiro caso real, levou um timeout genérico até a causa raiz: <strong>checksum TCP inválido no fio</strong>.</p>
+<div class="hero-actions">
+<a class="btn primary" href="#ouvir">▶ Ouvir a história</a>
+<a class="btn" href="#evidencias">Ver evidências</a>
+<button id="copyLink" type="button">Copiar link</button>
+</div>
+<div class="metrics">
+<div class="metric"><div class="k">Detector anterior</div><div class="v">Parado desde 01/05</div></div>
+<div class="metric"><div class="k">Falha observada</div><div class="v">2 SYN · 0 SYN/ACK</div></div>
+<div class="metric"><div class="k">Controle RouterOS</div><div class="v">RAW 0 · ICMP 3/3</div></div>
+<div class="metric"><div class="k">Recuperação</div><div class="v">≈ 3 s até READY</div></div>
+</div>
+</section>
+
+<div class="layout">
+<main>
+<section class="card">
+<div class="kicker">O contexto</div>
+<h2>Um projeto antigo, uma função nova</h2>
+<p>O TCP Brain já possuía backend, banco histórico de padrões e interface operacional. O que não existia mais era um pipeline vivo de observação: a última atividade do detector remontava a 1º de maio de 2026.</p>
+<p>Em vez de reconstruir tudo, a retomada preservou o backend histórico e adicionou duas camadas novas e independentes: um <strong>capture plane metadata-only</strong> e um <strong>Flow Analyzer</strong>.</p>
+<div class="flow">
+<div class="node"><strong>MikroTik ether2</strong><br><span class="note">Trunk real das VLANs de serviço</span></div>
+<div class="arrow">↓ mirror bidirecional</div>
+<div class="node"><strong>ether5 → AGT enp3s0</strong><br><span class="note">NIC dedicada, sem IP, rota, bridge ou VLAN de serviço</span></div>
+<div class="arrow">↓ metadados L2/L3/L4</div>
+<div class="node"><strong>TCP Brain Capture → Flow Analyzer</strong><br><span class="note">Fluxos, retries, handshakes e localização de salto</span></div>
+</div>
+<div class="pills"><span class="pill">payload_persisted=false</span><span class="pill">ai_used=false no Flow Analyzer</span><span class="pill">VLANs 210–217</span></div>
+</section>
+<section class="card">
+<div class="kicker">O incidente</div>
+<h2>Transport ativo. Browser ativo. CDP inalcançável.</h2>
+<p>O Transport do Attention Router estava em <code>10.77.10.10</code>, VLAN 211. O Browser estava em <code>10.77.10.2:9223</code>, VLAN 210. Dentro do namespace do Browser, o CDP respondia normalmente. A partir do Transport, a conexão expirava.</p>
+<div class="quote">A pergunta deixou de ser “por que o WhatsApp não conecta?” e virou “em qual salto o SYN desaparece?”.</div>
+<div class="timeline">
+<div class="step"><div class="n">1</div><div class="body"><strong>Flow Analyzer:</strong> 2 SYN, 1 retry, nenhum SYN/ACK e nenhum RST.</div></div>
+<div class="step"><div class="n">2</div><div class="body"><strong>Witness físico:</strong> o mesmo SYN foi confirmado no mirror da ether2. Não era apenas o kernel afirmando que transmitiu.</div></div>
+<div class="step"><div class="n">3</div><div class="body"><strong>Localização inter-VLAN:</strong> ingresso na VLAN 211 confirmado; nenhuma emissão correspondente na VLAN 210.</div></div>
+<div class="step"><div class="n">4</div><div class="body"><strong>RouterOS RAW:</strong> regra temporária exata para o TCP permaneceu em 0 pacotes. Um ICMP de controle da mesma origem foi visto 3/3.</div></div>
+</div>
+</section>
+<section class="card" id="evidencias">
+<div class="kicker">Evidência</div>
+<h2>O pacote estava no fio — mas não era um pacote TCP válido</h2>
+<div class="raw-grid">
+<div class="raw"><div class="label">SYN Transport → Browser</div><div class="value bad">checksum inválido</div><p class="note">One's complement não fechava em <code>0xffff</code>.</p></div>
+<div class="raw"><div class="label">Worker → PostgreSQL</div><div class="value good">checksum válido</div><p class="note">Controle funcional capturado pelo mesmo mirror físico.</p></div>
+<div class="raw"><div class="label">RAW prerouting · TCP</div><div class="value warn">0 pacotes</div><p class="note">O frame chegava à ether2, mas não alcançava o caminho IPv4 normal da RouterOS.</p></div>
+<div class="raw"><div class="label">RAW prerouting · ICMP</div><div class="value good">3 / 3</div><p class="note">Controle positivo da mesma origem para o gateway da VLAN 211.</p></div>
+</div>
+<pre>Falha:
+Transport 10.77.10.10
+  → VLAN 211
+  → ether2 [mirror confirma]
+  → checksum TCP inválido
+  → não aparece no RAW prerouting
+  → nenhuma cópia VLAN 210
+  → timeout</pre>
+<p>A diferença estava no stack do namespace Transport: <code>macvlan → VLAN → enp1s0/r8169</code>, com TX checksumming, TSO e GSO habilitados.</p>
+</section>
+<section class="card">
+<div class="kicker">A correção</div>
+<h2>Três offloads. Uma mudança cirúrgica.</h2>
+<p>Os offloads foram desabilitados somente no <code>eth0</code> do namespace <code>andy-transport</code>:</p>
+<pre>ethtool -K eth0 tx off tso off gso off</pre>
+<p>O ajuste foi persistido no script <code>/usr/local/sbin/andy-transport-netns</code>. No teste seguinte, o mesmo SYN apareceu no mirror com checksum válido e o CDP respondeu imediatamente.</p>
+<div class="evidence">
+<div class="box"><h3>Antes</h3><p class="bad"><strong>TCP checksum inválido</strong></p><p>CDP timeout · Transport NOT_READY</p></div>
+<div class="box"><h3>Depois</h3><p class="good"><strong>TCP checksum válido</strong></p><p>CDP alcançável · Transport READY</p></div>
+</div>
+<hr>
+<p>Depois da prova, somente o Transport foi reiniciado. O Browser permaneceu vivo, sem QR e sem novo pareamento. Aproximadamente três segundos depois:</p>
+<pre>service_state                 ready
+browser_debug_reachable       true
+wwebjs_connected              true
+owner_identity_verification   MATCH
+owner_command_authority_ready true
+client_state                  CONNECTED
+/ready                        HTTP 200</pre>
+</section>
+<section class="card">
+<div class="kicker">Por que virou marco</div>
+<h2>Não foi “achar uma configuração errada”. Foi reduzir hipótese até sobrar causa.</h2>
+<div class="flow">
+<div class="node">Timeout genérico</div><div class="arrow">↓</div>
+<div class="node">SYN sem SYN/ACK</div><div class="arrow">↓</div>
+<div class="node">Ingresso físico confirmado</div><div class="arrow">↓</div>
+<div class="node">Sem egress VLAN 210</div><div class="arrow">↓</div>
+<div class="node">Sem passagem pelo RAW da RouterOS</div><div class="arrow">↓</div>
+<div class="node"><strong>Checksum TCP inválido no fio</strong></div>
+</div>
+<p class="quote">A arquitetura de observabilidade deixou de ser uma proposta e produziu uma causa raiz verificável na primeira investigação séria após a reativação.</p>
+<p>Esse é o ponto de virada do TCP Brain: de base histórica pouco utilizada para instrumento operacional capaz de explicar <em>onde</em> um fluxo morreu e quais evidências sustentam essa conclusão.</p>
+</section>
+
+<section class="card">
+<div class="kicker">Limites conhecidos</div>
+<h2>O marco não esconde o que ainda precisa amadurecer</h2>
+<p>A NIC de captura opera a 100 Mb/s, o que é aceitável para a carga atual e será avaliado por perda real, não por diferença nominal de velocidade.</p>
+<p>Em carga maior, o coletor AF_PACKET em Python registrou drops de socket mesmo sem RX drops físicos. Esse hardening de buffer e processamento continua pendente. O sensor de trunk também é uma testemunha temporária de validação, não a arquitetura final.</p>
+<p class="note">Nada disso altera a cadeia de evidências da causa raiz descrita nesta página.</p>
+</section>
+</main>
+<aside class="card reader" id="ouvir">
+<div class="kicker">Narrativa técnica</div>
+<h2>Ouça este marco</h2>
+<p class="note">Narração pré-gerada com <strong>Zagan · xAI</strong>. O destaque acompanha o áudio no estilo karaokê.</p>
+<audio id="player" preload="metadata" src="/marcos/tcp-brain-2026-09-30/audio/zagan-tcp-brain-marco.mp3"></audio>
+<div class="controls">
+<button class="primary" id="play" type="button">▶ Reproduzir</button>
+<button id="pause" type="button">⏸ Pausar</button>
+<button id="stop" type="button">■ Parar</button>
+</div>
+<div class="progress"><div id="progressBar"></div></div>
+<p class="status" id="status">Zagan pronta para reproduzir.</p>
+<p><label>Velocidade: <span id="rateLabel">1×</span><br><input id="rate" type="range" min=".75" max="1.4" step=".05" value="1"></label></p>
+<div class="narration-text" id="narration">
+<p data-segment>Este marco registra a retomada do TCP Brain e o momento em que ele deixou de ser apenas um projeto interessante para virar uma ferramenta operacional de verdade. O backend histórico e o banco de padrões já existiam, mas o pipeline de detecção estava parado desde primeiro de maio de dois mil e vinte e seis. Em trinta de setembro, nós reativamos o projeto de forma incremental, sem substituir o que já funcionava.</p>
+<p data-segment>O caso que abriu essa nova fase apareceu no Attention Router. O Transport estava ativo, o Browser também, mas a conexão com o CDP em dez ponto setenta e sete ponto dez ponto dois, porta nove dois dois três, simplesmente expirava. O Browser respondia localmente, então o problema estava no caminho entre os dois serviços. Até aquele momento, a evidência dizia apenas que o SYN saía do Transport e que não havia SYN ACK de volta.</p>
+<p data-segment>A primeira mudança foi dar olhos físicos ao TCP Brain. Configuramos a ether dois da MikroTik como origem de mirror, a ether cinco como destino e entregamos essa cópia para a enp três s zero do AGT. Essa placa ficou dedicada à captura, sem IP, sem rota, sem bridge e sem VLAN de serviço. O coletor trabalha somente com uma pequena janela de cabeçalhos e não persiste payload de aplicação.</p>
+<p data-segment>Sobre essa captura nasceu o Flow Analyzer. Em vez de enxergar pacotes soltos, ele passou a reconstruir o comportamento do fluxo. No caso real do Transport para o Browser, ele registrou dois SYN, um retry, zero SYN ACK e zero RST. Em seguida, correlacionou o mesmo evento com a testemunha física da MikroTik. Ou seja: não era apenas o kernel dizendo que transmitiu. O pacote realmente apareceu no fio.</p>
+<p data-segment>A camada seguinte localizou o salto. O SYN entrou fisicamente pela VLAN duzentos e onze, mas nenhuma emissão correspondente apareceu na VLAN duzentos e dez, onde está o Browser. Criamos então uma regra temporária de diagnóstico no RAW da MikroTik, com match exato para aquele TCP. A tentativa continuou falhando e o contador ficou em zero. Como controle, um ICMP da mesma origem para o gateway foi visto três de três vezes. As regras temporárias foram removidas logo depois.</p>
+<p data-segment>Foi aí que a investigação ficou realmente interessante. A captura física mostrou que o SYN TCP do Transport estava chegando ao fio com checksum inválido. No mesmo mirror, um fluxo funcional entre Worker e PostgreSQL apresentava checksum correto. A diferença estava no stack do namespace Transport: macvlan, VLAN e a interface física r oito um seis nove, com TX checksumming, TSO e GSO habilitados.</p>
+<p data-segment>Desabilitamos esses três offloads somente no eth zero do namespace Transport. No teste seguinte, o SYN apareceu no mesmo mirror com checksum válido. Imediatamente, o CDP do Browser passou a responder. A correção foi persistida no script de criação do namespace, para sobreviver a uma futura recriação da rede.</p>
+<p data-segment>Depois da prova, reiniciamos apenas o Transport. O Browser não foi reiniciado, não houve QR e não houve novo pareamento do WhatsApp. Em aproximadamente três segundos, o Transport voltou a ready, com browser debug alcançável, WhatsApp conectado, identidade do proprietário validada e autoridade de comando pronta.</p>
+<p data-segment>Esse é o motivo pelo qual esta passada virou um marco de engenharia. A observabilidade reduziu o problema em etapas verificáveis: timeout, ausência de SYN ACK, ausência de egress inter VLAN, descarte antes do RAW e, finalmente, checksum TCP inválido no fio. A causa não foi escolhida por intuição. Ela foi encontrada por evidência. E o próprio TCP Brain, recém reativado, foi a ferramenta que tornou isso possível.</p>
+</div>
+</aside>
+</div>
+
+<footer class="footer">
+<strong>Marco de Engenharia 001</strong> · TCP Brain · 30/09/2026<br>
+<span>Diagnóstico orientado por evidência · captura metadata-only · nenhum payload persistido pelo Flow Analyzer.</span>
+</footer>
+</div>
+<script src="/marcos/tcp-brain-2026-09-30/app.js?v=20260930-1"></script>
+</body>
+</html>

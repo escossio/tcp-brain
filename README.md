@@ -55,6 +55,45 @@ Machine-specific config, service files, Apache rules, Cloudflare routing, secret
 - Versioned dashboard source: `public/tcp-brain/`
 - Operational documentation: `docs/`
 
+## Passive capture and Flow Analyzer
+
+On 2026-09-30, TCP Brain gained a separate passive observation plane for the
+Attention Router service VLANs.
+
+The current validated observation path is:
+
+```text
+MikroTik ether2
+-> bidirectional switch mirror
+-> MikroTik ether5
+-> AGT enp3s0
+-> tcp-brain-capture.service
+-> /run/tcp-brain-capture/events.sock
+-> tcp-brain-flow.service
+```
+
+The capture service reads a bounded header window and emits structured L2/L3/L4
+metadata only. It does not persist raw packet payload.
+
+The Flow Analyzer reconstructs TCP state, retries and handshake failures, and
+can correlate inter-VLAN ingress/egress observations. The current analyzer does
+not call AI.
+
+A temporary authoritative sensor on `enp1s0`
+(`tcp-brain-capture-trunk.service`) is currently used to validate L3/L4
+semantics while the physical mirror path is hardened.
+
+The first production case using this stack isolated a Transport-to-Browser CDP
+failure down to an invalid TCP checksum emitted by the Transport namespace.
+The fix disabled TX checksum/TSO/GSO only on that namespace interface.
+
+See:
+
+- [docs/CAPTURE.md](docs/CAPTURE.md)
+- [docs/FLOW_ANALYZER.md](docs/FLOW_ANALYZER.md)
+- [milestone: 2026-09-30 TCP Brain revival](docs/milestones/2026-09-30-tcp-brain-revival.md)
+- public story: https://www.escossio.com/marcos/tcp-brain-2026-09-30/
+
 ## Main endpoints
 
 When accessed through the current public prefix, the main routes are:
