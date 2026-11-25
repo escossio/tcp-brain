@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import datetime as dt
 import json
 import os
@@ -81,6 +82,24 @@ def attention_vlan_for_ip(ip: str) -> int | None:
     return 210 + (d // 8)
 
 
+def load_network_map(path: Path | None):
+    """Optional explicit topology. Invalid configuration fails startup."""
+    if path is None:
+        return None
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict) or not isinstance(data.get("networks"), list) or not data["networks"]:
+        raise ValueError("network map requires a nonempty networks list")
+    mappings = []
+    for item in data["networks"]:
+        if not isinstance(item, dict) or type(item.get("vlan")) is not int or not 1 <= item["vlan"] <= 4094:
+            raise ValueError("invalid VLAN")
+        network = ipaddress.IPv4Network(item["cidr"], strict=True)
+        if any(network.overlaps(other) for other, _ in mappings):
+            raise ValueError("overlapping network map")
+        mappings.append((network, item["vlan"]))
+    return tuple(mappings)
+
+
 class FlowAnalyzerCore:
     def __init__(
         self,
@@ -89,8 +108,10 @@ class FlowAnalyzerCore:
         dedupe_window_ms: float = 5.0,
         router_mac: str | None = None,
         forward_timeout_ms: float = 50.0,
+        network_map=None,
     ) -> None:
         self.entities = entities
+        self.network_map = network_map
         self.router_mac = router_mac.lower() if router_mac else None
         self.handshake_timeout_ns = int(handshake_timeout_s * 1e9)
         self.dedupe_window_ns = int(dedupe_window_ms * 1e6)
@@ -111,8 +132,26 @@ class FlowAnalyzerCore:
         self.forward_pending: dict[tuple[Any, ...], dict[str, Any]] = {}
         self.forward_reported: dict[tuple[Any, ...], int] = {}
         self.forward_ok_total = 0
+        self.forward_ok_by_vlan: dict[str, int] = {}
         self.forward_missing_total = 0
         self.last_path_event: dict[str, Any] | None = None
+        self.observation_inconclusive_total = 0
+        self.last_observation_inconclusive = None
+        self.forward_egress_recent = {}
+
+    def vlan_for_ip(self, value):
+        if self.network_map is None:
+            return attention_vlan_for_ip(value)
+        try:
+            addr = ipaddress.IPv4Address(value)
+        except (ValueError, TypeError):
+            return None
+        return next((vid for net,vid in self.network_map if addr in net), None)
+
+    def forward_observed(self, source_vlan, destination_vlan):
+        self.forward_ok_total += 1
+        key = f"{source_vlan}->{destination_vlan}"
+        self.forward_ok_by_vlan[key] = self.forward_ok_by_vlan.get(key, 0) + 1
 
     @staticmethod
     def _l2_key(event: dict[str, Any]) -> tuple[Any, ...] | None:
@@ -205,8 +244,8 @@ class FlowAnalyzerCore:
         dst_ip = str(event.get("dst_ip") or "")
         if src_ip not in self.entities or dst_ip not in self.entities:
             return
-        src_vlan = attention_vlan_for_ip(src_ip)
-        dst_vlan = attention_vlan_for_ip(dst_ip)
+        src_vlan = self.vlan_for_ip(src_ip)
+        dst_vlan = self.vlan_for_ip(dst_ip)
         if src_vlan is None or dst_vlan is None or src_vlan == dst_vlan:
             return
 
@@ -217,6 +256,10 @@ class FlowAnalyzerCore:
         ts = int(event["capture_timestamp_ns"])
 
         if dst_mac == self.router_mac and observed_vlan == src_vlan:
+            earlier_arrival = self.forward_egress_recent.pop(signature, None)
+            if earlier_arrival is not None and 0 <= earlier_arrival-ts <= self.forward_timeout_ns:
+                self.forward_observed(src_vlan,dst_vlan)
+                return
             if signature not in self.forward_pending:
                 self.forward_pending[signature] = {
                     "signature": signature,
@@ -238,7 +281,9 @@ class FlowAnalyzerCore:
         if src_mac == self.router_mac and observed_vlan == dst_vlan:
             pending = self.forward_pending.pop(signature, None)
             if pending is not None:
-                self.forward_ok_total += 1
+                self.forward_observed(src_vlan,dst_vlan)
+            else:
+                self.forward_egress_recent[signature] = ts
 
     def _path_missing_event(
         self, pending: dict[str, Any], now_ns: int
@@ -437,7 +482,22 @@ class FlowAnalyzerCore:
 
         return out
 
-    def expire(self, now_ns: int) -> list[dict[str, Any]]:
+    def _inconclusive(self, kind, src, dst, started, deadline, reason, now_ns):
+        self.event_seq += 1
+        self.observation_inconclusive_total += 1
+        event = {"schema_version": "tcp-brain.observation.v1",
+                 "event_id": f"observation-{now_ns:x}-{self.event_seq:x}",
+                 "event_type": "OBSERVATION_INCONCLUSIVE", "candidate_type": kind,
+                 "severity": "INFO", "src_ip": src[0], "src_port": src[1],
+                 "dst_ip": dst[0], "dst_port": dst[1],
+                 "window_start_ns": started, "window_end_ns": deadline,
+                 "reason": reason, "network_fault_confirmed": False,
+                 "natural_language": "Cobertura insuficiente para concluir ausência do evento esperado; causa de rede não demonstrada.",
+                 "payload_observed": False, "ai_used": False}
+        self.last_observation_inconclusive = event
+        return event
+
+    def expire(self, now_ns: int, guard=None) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for flow in list(self.flows.values()):
             first_syn = flow.get("first_syn_ns")
@@ -448,15 +508,40 @@ class FlowAnalyzerCore:
                 and not flow["anomaly_emitted"]
                 and now_ns - int(first_syn) >= self.handshake_timeout_ns
             ):
+                started = int(first_syn)
+                deadline = started + self.handshake_timeout_ns
+                vlans = {self.vlan_for_ip(ep[0]) for ep in (flow["initiator"], flow["responder"])}
+                decision, reason = guard(started, deadline, vlans, now_ns) if guard else ("observed", "legacy_core_test")
+                if decision == "wait":
+                    continue
                 flow["state"] = "TIMEOUT"
-                out.append(self._anomaly(flow, "HANDSHAKE_INCOMPLETE", now_ns))
+                if decision == "inconclusive":
+                    flow["anomaly_emitted"] = True
+                    out.append(self._inconclusive("HANDSHAKE_INCOMPLETE", flow["initiator"], flow["responder"], started, deadline, reason, now_ns))
+                else:
+                    e = self._anomaly(flow, "HANDSHAKE_INCOMPLETE", now_ns)
+                    if guard:
+                        e.update({"network_fault_confirmed": False, "observation_coverage": "BOUNDED_WINDOW", "natural_language": "SYN observado; SYN/ACK não observado no intervalo coberto. A causa não está demonstrada."})
+                    out.append(e)
 
         for signature, pending in list(self.forward_pending.items()):
             if now_ns - int(pending["timestamp_ns"]) < self.forward_timeout_ns:
                 continue
             last_reported = self.forward_reported.get(signature)
             if last_reported is None or now_ns - last_reported >= int(5e9):
-                out.append(self._path_missing_event(pending, now_ns))
+                started = int(pending["timestamp_ns"])
+                deadline = started + self.forward_timeout_ns
+                vlans = {pending["ingress_vlan"], pending["expected_egress_vlan"]}
+                decision, reason = guard(started, deadline, vlans, now_ns) if guard else ("observed", "legacy_core_test")
+                if decision == "wait":
+                    continue
+                if decision == "inconclusive":
+                    out.append(self._inconclusive("INTER_VLAN_EGRESS_MISSING", (pending["src_ip"], pending["src_port"]), (pending["dst_ip"], pending["dst_port"]), started, deadline, reason, now_ns))
+                else:
+                    e = self._path_missing_event(pending, now_ns)
+                    if guard:
+                        e.update({"network_fault_confirmed": False, "observation_coverage": "BOUNDED_WINDOW", "natural_language": "SYN no ingresso observado; egresso correspondente não observado no intervalo coberto. Não comprova falha do roteador."})
+                    out.append(e)
                 self.forward_reported[signature] = now_ns
             self.forward_pending.pop(signature, None)
 
@@ -465,6 +550,8 @@ class FlowAnalyzerCore:
             key: flow for key, flow in self.flows.items()
             if int(flow["last_seen_ns"]) >= cutoff
         }
+        self.forward_reported = {k:v for k,v in self.forward_reported.items() if now_ns-v < 5_000_000_000}
+        self.forward_egress_recent = {k:v for k,v in self.forward_egress_recent.items() if now_ns-v < 2_100_000_000}
         seen_cutoff = now_ns - int(1e9)
         self.seen_packets = {
             fp: ts for fp, ts in self.seen_packets.items() if ts >= seen_cutoff
@@ -485,6 +572,123 @@ class FlowAnalyzerCore:
             if any(ts >= correlation_cutoff for ts, _wire, _flow_key in values)
         }
         return out
+class StreamContinuity:
+    """Track per-source sequence/epoch; old producers remain unverified."""
+    def __init__(self):
+        self.epoch = None
+        self.seq = None
+        self.gaps = 0
+        self.epoch_changes = 0
+        self.out_of_order = 0
+        self.unverified = 0
+        self.disconnects = 0
+        self.invalid_records = 0
+
+    def observe(self, event):
+        epoch, seq = event.get("stream_epoch"), event.get("stream_seq")
+        if not isinstance(epoch, str) or type(seq) is not int or seq < 1:
+            self.unverified += 1
+            return
+        if self.epoch != epoch:
+            if self.epoch is not None:
+                self.epoch_changes += 1
+            self.epoch, self.seq = epoch, seq
+            return
+        if seq <= self.seq:
+            self.out_of_order += 1
+            return
+        self.gaps += seq-self.seq-1
+        self.seq = seq
+
+    def status(self):
+        return dict(vars(self))
+
+
+class CoverageWindow:
+    """Per-source bounded observed window, not a proof of loss-free wire."""
+    MAX_AGE_NS = 1_000_000_000
+    def __init__(self):
+        self.start = None
+        self.watermark = None
+        self.counters = None
+        self.vlans = set()
+        self.reason = "no_marker"
+        self.epoch = None
+
+    def invalidate(self, reason):
+        self.start = self.watermark = None
+        self.counters = None
+        self.vlans = set()
+        self.epoch = None
+        self.reason = reason
+
+    def mark(self, record, tracker, now_ns, require_l3=False):
+        ep, seq, wm = (record.get(k) for k in ("stream_epoch", "stream_seq", "watermark_ns"))
+        counters = record.get("counters")
+        vlans = record.get("vlans")
+        required = {"rx_dropped","rx_missed_errors","rx_errors","socket_drops","parse_errors","timestamp_missing","timestamp_regressions","l3_ambiguous"}
+        valid = (type(ep) is str and type(seq) is int and seq >= 0 and type(wm) is int and 0 < wm <= now_ns
+                 and now_ns-wm <= self.MAX_AGE_NS and record.get("healthy") is True
+                 and isinstance(counters,dict) and required <= set(counters)
+                 and all(type(counters[k]) is int and counters[k]>=0 for k in required)
+                 and isinstance(vlans,list) and all(type(v) is int and 1<=v<=4094 for v in vlans))
+        if not valid:
+            self.invalidate("invalid_stale_or_unhealthy_marker")
+            return
+        # Marker itself is not an event. For an initial idle stream it can
+        # establish the baseline; a sequence jump cannot be silently accepted.
+        if tracker.epoch is None:
+            tracker.epoch,tracker.seq=ep,seq
+        elif ep != tracker.epoch or seq != tracker.seq:
+            if ep != tracker.epoch:
+                tracker.epoch_changes += 1
+            elif seq > tracker.seq:
+                tracker.gaps += seq-tracker.seq
+            else:
+                tracker.out_of_order += 1
+            tracker.epoch,tracker.seq=ep,seq
+            self.invalidate("marker_sequence_discontinuity")
+            return
+        sample={k:counters[k] for k in required if require_l3 or k!="l3_ambiguous"}
+        if self.watermark is not None and (wm<=self.watermark or ep!=self.epoch or self.counters!=sample or self.vlans!=set(vlans)):
+            self.invalidate("capture_counter_scope_or_clock_changed")
+            return
+        if self.start is None:
+            self.start=wm
+        self.watermark=wm
+        self.counters=sample
+        self.vlans=set(vlans)
+        self.epoch=ep
+        self.reason="observed_window"
+
+    def status(self, now_ns):
+        return {"start_ns":self.start,"watermark_ns":self.watermark,"reason":self.reason,
+                "fresh":self.watermark is not None and 0<=now_ns-self.watermark<=self.MAX_AGE_NS,
+                "vlans":sorted(self.vlans)}
+
+
+class EvidenceGuard:
+    GRACE_NS=2_000_000_000
+    def __init__(self,names):
+        self.windows={n:CoverageWindow() for n in names}
+
+    def decide(self, started, deadline, vlans, now_ns, connected):
+        if None in vlans or not vlans or "trunk" not in self.windows:
+            return "inconclusive","unknown_scope_or_no_authoritative_trunk"
+        for n,w in self.windows.items():
+            if n not in connected:
+                return "inconclusive","source_disconnected"
+            if w.start is not None and w.start>started:
+                return "inconclusive","window_starts_after_candidate"
+            if w.start is not None and not vlans<=w.vlans:
+                return "inconclusive","scope_not_covered"
+            if w.watermark is None or w.watermark<deadline or now_ns-w.watermark>CoverageWindow.MAX_AGE_NS:
+                if now_ns < deadline+self.GRACE_NS:
+                    return "wait","coverage_pending"
+                return "inconclusive","coverage_not_proven_before_deadline"
+        return "observed","bounded_window"
+
+
 class FlowDaemon:
     def __init__(
         self,
@@ -505,6 +709,8 @@ class FlowDaemon:
         self.clients: list[socket.socket] = []
         self.events_emitted = 0
         self.input_events = 0
+        self.continuity = {name: StreamContinuity() for name in inputs}
+        self.evidence_guard = EvidenceGuard(inputs)
         self.last_input_ns: int | None = None
 
         self.event_socket.parent.mkdir(parents=True, exist_ok=True)
@@ -531,6 +737,7 @@ class FlowDaemon:
                 s.setblocking(False)
                 self.sources[name] = s
                 self.buffers[name] = b""
+                self.evidence_guard.windows[name].invalidate("connection_started")
             except OSError as exc:
                 print(json.dumps({
                     "event": "source_connect_failed",
@@ -574,22 +781,44 @@ class FlowDaemon:
         except OSError:
             data = b""
         if not data:
+            self.continuity[name].disconnects += 1
+            self.evidence_guard.windows[name].invalidate("source_disconnected")
+            if self.buffers.get(name):
+                self.continuity[name].invalid_records += 1
             s.close()
             self.sources.pop(name, None)
             self.reconnect_at[name] = time.monotonic() + 1.0
             return
 
-        buf = self.buffers.get(name, b"") + data
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
+        lines = (self.buffers.get(name, b"") + data).split(b"\n")
+        buf = lines.pop()
+        for line in lines:
             if not line:
                 continue
             try:
                 event = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.continuity[name].invalid_records += 1
+                self.evidence_guard.windows[name].invalidate("invalid_json")
                 continue
+            if not isinstance(event, dict):
+                self.continuity[name].invalid_records += 1
+                self.evidence_guard.windows[name].invalidate("invalid_record")
+                continue
+            tracker=self.continuity[name]
+            window=self.evidence_guard.windows[name]
+            if event.get("record_type")=="COVERAGE":
+                window.mark(event,tracker,time.time_ns(),require_l3=name=="trunk")
+                continue
+            before=(tracker.gaps,tracker.epoch_changes,tracker.out_of_order,tracker.unverified)
+            tracker.observe(event)
+            if before!=(tracker.gaps,tracker.epoch_changes,tracker.out_of_order,tracker.unverified):
+                window.invalidate("stream_discontinuity")
+            ts=event.get("capture_timestamp_ns")
+            if type(ts) is not int or (window.watermark is not None and ts<window.watermark):
+                window.invalidate("late_or_missing_capture_timestamp")
             self.input_events += 1
-            self.last_input_ns = int(event.get("capture_timestamp_ns") or time.time_ns())
+            self.last_input_ns = max(self.last_input_ns or 0, int(event.get("capture_timestamp_ns") or time.time_ns()))
             for flow_event in self.core.ingest(event, name):
                 self.publish(flow_event)
         self.buffers[name] = buf
@@ -601,7 +830,12 @@ class FlowDaemon:
             freshness = max(0.0, (now - self.last_input_ns) / 1e9)
         return {
             "schema_version": STATUS_SCHEMA,
-            "state": "HEALTHY" if self.sources else "NO_INPUT",
+            "state": "HEALTHY" if len(self.sources) == len(self.inputs) and self.sources else "DEGRADED" if self.sources else "NO_INPUT",
+            "stream_continuity": {name: tracker.status() for name, tracker in self.continuity.items()},
+            "coverage": {n:w.status(now) for n,w in self.evidence_guard.windows.items()},
+            "observation_state": "BOUNDED_COVERAGE" if self.sources and set(self.sources)==set(self.inputs) and all(w.status(now)["fresh"] for w in self.evidence_guard.windows.values()) else "INCONCLUSIVE",
+            "observation_inconclusive_total": self.core.observation_inconclusive_total,
+            "last_observation_inconclusive": self.core.last_observation_inconclusive,
             "started_timestamp_ns": self.started_ns,
             "inputs_configured": sorted(self.inputs),
             "inputs_connected": sorted(self.sources),
@@ -614,6 +848,7 @@ class FlowDaemon:
             "established_total": self.core.established_total,
             "anomalies_total": self.core.anomalies_total,
             "forward_ok_total": self.core.forward_ok_total,
+            "forward_ok_by_vlan": dict(self.core.forward_ok_by_vlan),
             "forward_missing_total": self.core.forward_missing_total,
             "forward_pending": len(self.core.forward_pending),
             "last_path_event": self.core.last_path_event,
@@ -637,7 +872,7 @@ class FlowDaemon:
             for name, sock in list(self.sources.items()):
                 if sock in readable:
                     self.consume(name)
-            for event in self.core.expire(time.time_ns()):
+            for event in self.core.expire(time.time_ns(), lambda a,b,c,d: self.evidence_guard.decide(a,b,c,d,self.sources)):
                 self.publish(event)
             now = time.monotonic()
             if now >= next_status:
@@ -674,6 +909,7 @@ def main() -> int:
     parser.add_argument("--event-socket", type=Path, default=Path("/run/tcp-brain-flow/events.sock"))
     parser.add_argument("--status-file", type=Path, default=Path("/run/tcp-brain-flow/status.json"))
     parser.add_argument("--entities", type=Path)
+    parser.add_argument("--network-map", type=Path)
     parser.add_argument("--handshake-timeout", type=float, default=2.0)
     parser.add_argument("--dedupe-window-ms", type=float, default=5.0)
     parser.add_argument("--router-mac")
@@ -689,6 +925,7 @@ def main() -> int:
         dedupe_window_ms=args.dedupe_window_ms,
         router_mac=args.router_mac,
         forward_timeout_ms=args.forward_timeout_ms,
+        network_map=load_network_map(args.network_map),
     )
     daemon = FlowDaemon(inputs, args.event_socket, args.status_file, core)
     print(json.dumps({
