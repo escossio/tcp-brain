@@ -9,6 +9,9 @@ socket and aggregate health is persisted to a status JSON file.
 from __future__ import annotations
 
 import argparse
+import errno
+from collections import deque
+from itertools import islice
 import datetime as dt
 import json
 import os
@@ -265,6 +268,67 @@ def write_json_atomic(path: Path, obj: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+class SubscriberQueue:
+    """One bounded FIFO per peer. No blocking write or unbounded allocation."""
+    def __init__(self, sock, max_records=1024, max_bytes=1024*1024):
+        self.sock = sock
+        self.max_records = max_records
+        self.max_bytes = max_bytes
+        self.frames = deque()
+        self.offset = 0
+        self.allocated_bytes = 0
+        self.pending_bytes = 0
+        self.peak_bytes = 0
+        self.completed = 0
+        self.backpressure = 0
+        self.partial_writes = 0
+
+    def enqueue(self, frame):
+        if len(self.frames) >= self.max_records or self.allocated_bytes + len(frame) > self.max_bytes:
+            return False
+        self.frames.append(frame)
+        self.allocated_bytes += len(frame)
+        self.pending_bytes += len(frame)
+        self.peak_bytes = max(self.peak_bytes, self.allocated_bytes)
+        return True
+
+    def flush(self):
+        if not self.frames:
+            return
+        parts = []
+        size = 0
+        for i, frame in enumerate(islice(self.frames, 64)):
+            part = memoryview(frame)[self.offset if i == 0 else 0:]
+            if size + len(part) > 65536:
+                part = part[:65536-size]
+            if part:
+                parts.append(part)
+                size += len(part)
+            if size == 65536:
+                break
+        try:
+            sent = self.sock.sendmsg(parts)
+        except (BlockingIOError, InterruptedError):
+            self.backpressure += 1
+            return
+        if sent <= 0:
+            raise BrokenPipeError(errno.EPIPE, "socket write returned zero")
+        if sent < size:
+            self.partial_writes += 1
+        self.pending_bytes -= sent
+        while sent:
+            head = self.frames[0]
+            remain = len(head) - self.offset
+            if sent < remain:
+                self.offset += sent
+                break
+            sent -= remain
+            self.frames.popleft()
+            self.allocated_bytes -= len(head)
+            self.offset = 0
+            self.completed += 1
+
+
 class Collector:
     def __init__(
         self,
@@ -324,7 +388,23 @@ class Collector:
         os.chmod(self.socket_path, 0o660)
         self.server.listen(8)
         self.server.setblocking(False)
-        self.clients: list[socket.socket] = []
+        self.clients: dict[socket.socket, SubscriberQueue] = {}
+        self.subscriber_backpressure = 0
+        self.subscriber_partial_writes = 0
+        self.subscriber_queue_overflows = 0
+        self.subscriber_peer_closed = 0
+        self.subscriber_write_errors = 0
+        self.subscriber_shutdowns = 0
+        self.subscriber_rejected = 0
+        self.subscriber_queue_records_discarded = 0
+        self.subscriber_queue_peak_bytes = 0
+        self.subscriber_frames_written = 0
+        self.packet_stats_drops = 0
+        self.packet_stats_reads = 0
+        self.timestamp_missing = 0
+        self.timestamp_regressions = 0
+        self.l3_ambiguous = 0
+        self.last_coverage_ns = 0
 
     def stop(self, *_: Any) -> None:
         self.running = False
@@ -352,31 +432,93 @@ class Collector:
                     aux_vlan_tpid = vlan_tpid if status & TP_STATUS_VLAN_TPID_VALID else 0x8100
         return ts_ns, drops, aux_vlan_id, aux_vlan_tpid
 
+    def disconnect_client(self, client, reason, extra_discarded=0):
+        q = self.clients.pop(client)
+        # Counts application-queued records not completely written, not exact
+        # consumer-side loss; kernel-buffered records may be unobserved too.
+        self.subscriber_queue_records_discarded += len(q.frames) + extra_discarded
+        if reason == "shutdown":
+            self.subscriber_shutdowns += 1
+        else:
+            self.subscriber_drops += 1
+        if reason == "overflow":
+            self.subscriber_queue_overflows += 1
+        elif reason == "peer_closed":
+            self.subscriber_peer_closed += 1
+        elif reason != "shutdown":
+            self.subscriber_write_errors += 1
+        try:
+            client.close()
+        except OSError:
+            pass
+
     def broadcast(self, event: dict[str, Any]) -> None:
         if not self.clients:
             return
         payload = (json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode()
-        alive: list[socket.socket] = []
-        for client in self.clients:
-            try:
-                client.sendall(payload)
-                alive.append(client)
-            except (BrokenPipeError, ConnectionResetError, BlockingIOError, OSError):
-                self.subscriber_drops += 1
-                try:
-                    client.close()
-                except OSError:
-                    pass
-        self.clients = alive
+        for client, q in list(self.clients.items()):
+            if not q.enqueue(payload):
+                # Evict only this slow subscriber. A reconnect exposes the
+                # gap via stream sequence; there is no implicit replay.
+                self.disconnect_client(client, "overflow", extra_discarded=1)
+            else:
+                self.subscriber_queue_peak_bytes = max(self.subscriber_queue_peak_bytes, q.peak_bytes)
+
+    def flush_client(self, client):
+        q = self.clients.get(client)
+        if q is None:
+            return
+        before = (q.backpressure, q.partial_writes, q.completed)
+        try:
+            q.flush()
+        except OSError as exc:
+            self.disconnect_client(client, "peer_closed" if exc.errno in (errno.EPIPE, errno.ECONNRESET) else "write_error")
+        finally:
+            self.subscriber_backpressure += q.backpressure-before[0]
+            self.subscriber_partial_writes += q.partial_writes-before[1]
+            self.subscriber_frames_written += q.completed-before[2]
 
     def accept_clients(self) -> None:
-        while True:
+        for _ in range(8):
             try:
                 client, _ = self.server.accept()
-                client.setblocking(False)
-                self.clients.append(client)
             except BlockingIOError:
                 return
+            client.setblocking(False)
+            if len(self.clients) >= 8:
+                self.subscriber_rejected += 1
+                client.close()
+            else:
+                self.clients[client] = SubscriberQueue(client)
+
+    def coverage_marker(self, empty_before_ns):
+        # PACKET_STATISTICS reads and resets kernel interval counters. Keep
+        # our own cumulative counter, separate from SO_RXQ_OVFL.
+        stats_ok = False
+        try:
+            _packets, drops = struct.unpack("II", self.packet_sock.getsockopt(SOL_PACKET, 6, 8))
+            self.packet_stats_drops += drops
+            self.packet_stats_reads += 1
+            stats_ok = True
+        except (OSError, struct.error):
+            pass
+        stats = {k: read_int(self.sysfs / k, -1) for k in
+                 ("rx_dropped", "rx_missed_errors", "rx_errors")}
+        carrier = read_int(Path("/sys/class/net") / self.interface / "carrier", -1)
+        # Safety margin is an engineering bound, not a guarantee about the wire.
+        watermark = max(0, empty_before_ns - 10_000_000)
+        healthy = stats_ok and carrier == 1 and all(v >= 0 for v in stats.values())
+        if watermark <= self.last_coverage_ns:
+            healthy = False
+        self.last_coverage_ns = watermark
+        self.broadcast({"record_type": "COVERAGE", "stream_epoch": str(self.started_ns),
+                        "stream_seq": self.events_emitted, "watermark_ns": watermark,
+                        "healthy": healthy, "vlans": sorted(self.vlans),
+                        "counters": {**stats, "socket_drops": self.packet_stats_drops,
+                                     "parse_errors": self.parse_errors,
+                                     "timestamp_missing": self.timestamp_missing,
+                                     "timestamp_regressions": self.timestamp_regressions,
+                                     "l3_ambiguous": self.l3_ambiguous}})
 
     def status(self) -> dict[str, Any]:
         now_ns = time.time_ns()
@@ -417,6 +559,22 @@ class Collector:
             "interface_rx_drop_delta": rx_drop_delta,
             "interface_rx_missed_delta": rx_missed_delta,
             "subscriber_drops": self.subscriber_drops,
+            "subscriber_backpressure": self.subscriber_backpressure,
+            "subscriber_partial_writes": self.subscriber_partial_writes,
+            "subscriber_queue_overflows": self.subscriber_queue_overflows,
+            "subscriber_peer_closed": self.subscriber_peer_closed,
+            "subscriber_write_errors": self.subscriber_write_errors,
+            "subscriber_shutdowns": self.subscriber_shutdowns,
+            "subscriber_rejected": self.subscriber_rejected,
+            "subscriber_queue_records_discarded": self.subscriber_queue_records_discarded,
+            "subscriber_queue_peak_bytes": self.subscriber_queue_peak_bytes,
+            "subscriber_queued_bytes": sum(q.allocated_bytes for q in self.clients.values()),
+            "subscriber_frames_written": self.subscriber_frames_written,
+            "stream_epoch": str(self.started_ns),
+            "stream_seq": self.events_emitted,
+            "packet_statistics_drops": self.packet_stats_drops,
+            "packet_statistics_reads": self.packet_stats_reads,
+            "coverage_watermark_ns": self.last_coverage_ns,
             "current_bps": round(self.current_bps, 2),
             "peak_bps": round(self.peak_bps, 2),
             "last_packet_timestamp_ns": self.last_packet_ns,
@@ -440,27 +598,39 @@ class Collector:
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
         next_status = time.monotonic()
+        next_coverage = time.monotonic()
         ancbuf = socket.CMSG_SPACE(16) + socket.CMSG_SPACE(4) + socket.CMSG_SPACE(20)
         buf = bytearray(HEADER_WINDOW)
 
         while self.running:
-            readable, _, _ = select.select([self.packet_sock, self.server], [], [], 0.25)
+            writers = [client for client, q in self.clients.items() if q.frames]
+            readable, writable, _ = select.select([self.packet_sock, self.server], writers, [], 0.1)
+            for client in writable:
+                self.flush_client(client)
             if self.server in readable:
                 self.accept_clients()
 
-            if self.packet_sock in readable:
-                while True:
+            empty_before_ns = None
+            if self.packet_sock in readable or time.monotonic() >= next_coverage:
+                # Finite capture budget prevents starving writable peers.
+                for _ in range(64):
+                    attempt_ns = time.time_ns()
                     try:
                         nbytes, ancdata, _flags, packet_addr = self.packet_sock.recvmsg_into(
                             [buf], ancbuf, socket.MSG_TRUNC
                         )
                     except BlockingIOError:
+                        empty_before_ns = attempt_ns
                         break
                     except OSError:
                         self.parse_errors += 1
                         break
 
                     ts_ns, drops, aux_vlan_id, aux_vlan_tpid = self.ancillary_metadata(ancdata)
+                    if not any(level == socket.SOL_SOCKET and ctype == SO_TIMESTAMPNS and len(data) >= 16 for level, ctype, data in ancdata):
+                        self.timestamp_missing += 1
+                    if self.last_packet_ns is not None and ts_ns < self.last_packet_ns:
+                        self.timestamp_regressions += 1
                     if drops is not None:
                         self.socket_drop_count = max(self.socket_drop_count, drops)
                     if aux_vlan_id is not None:
@@ -490,16 +660,24 @@ class Collector:
                         continue
 
                     if not event:
+                        self.parse_errors += 1
                         continue
                     vlan_id = event.get("vlan_id")
                     if vlan_id not in self.vlans:
                         continue
 
+                    if event.get("decode_quality") != "FULL_L3_L4" or (event.get("ip_protocol") == 6 and event.get("protocol") != "TCP"):
+                        self.l3_ambiguous += 1
                     self.events_emitted += 1
+                    event["stream_epoch"] = str(self.started_ns)
+                    event["stream_seq"] = self.events_emitted
                     self.last_event = event
                     self.broadcast(event)
 
             now = time.monotonic()
+            if empty_before_ns is not None and now >= next_coverage:
+                self.coverage_marker(empty_before_ns)
+                next_coverage = now + 0.1
             if now >= next_status:
                 self.update_rate()
                 write_json_atomic(self.status_file, self.status())
@@ -509,11 +687,8 @@ class Collector:
             write_json_atomic(self.status_file, self.status())
         except OSError:
             pass
-        for client in self.clients:
-            try:
-                client.close()
-            except OSError:
-                pass
+        for client in list(self.clients):
+            self.disconnect_client(client, "shutdown")
         self.packet_sock.close()
         self.server.close()
         try:
